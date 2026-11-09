@@ -175,7 +175,8 @@
                                      OptionConverter, BoundedFIFO,
                                      CyclicBuffer, OR,
                                      LevelMatchFilter, PatternParser, 
-                                     ErrorHandler,Rewrite, JNDIUtil, JDBCAppender"/>
+                                     ErrorHandler,Rewrite, JNDIUtil, JDBCAppender,
+                                     HardenedObjectInputStream, SocketNode, Chainsaw"/>
 
   <!-- ================================================================= -->
   <!-- Longer unit tests                                                 -->
@@ -489,6 +490,33 @@
       <formatter type="plain" usefile="false"/>
       <test name="org.apache.log4j.nt.NTEventLogAppenderTest" />
     </junit>
+  </target>
+
+  <target name="HardenedObjectInputStream" depends="build">
+      <junit printsummary="yes" fork="yes"
+        haltonfailure="${haltonfailure}" dir="${basedir}">
+        <classpath refid="tests.classpath"/>
+        <formatter type="plain" usefile="false"/>
+        <test name="org.apache.log4j.net.HardenedObjectInputStreamTest" />
+      </junit>
+  </target>
+
+  <target name="SocketNode" depends="build">
+      <junit printsummary="yes" fork="yes"
+        haltonfailure="${haltonfailure}" dir="${basedir}">
+        <classpath refid="tests.classpath"/>
+        <formatter type="plain" usefile="false"/>
+        <test name="org.apache.log4j.net.SocketNodeTest" />
+      </junit>
+  </target>
+
+  <target name="Chainsaw" depends="build">
+      <junit printsummary="yes" fork="yes"
+        haltonfailure="${haltonfailure}" dir="${basedir}">
+        <classpath refid="tests.classpath"/>
+        <formatter type="plain" usefile="false"/>
+        <test name="org.apache.log4j.chainsaw.LoggingReceiverTest" />
+      </junit>
   </target>
 
   <target name="Socket" depends="build">
