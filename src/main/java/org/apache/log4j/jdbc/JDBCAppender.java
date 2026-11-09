@@ -18,12 +18,14 @@ package org.apache.log4j.jdbc;
 
 import java.sql.Connection;
 import java.sql.DriverManager;
+import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.Iterator;
 
 import org.apache.log4j.PatternLayout;
+import org.apache.log4j.helpers.OptionConverter;
 import org.apache.log4j.spi.ErrorCode;
 import org.apache.log4j.spi.LoggingEvent;
 
@@ -48,6 +50,18 @@ import org.apache.log4j.spi.LoggingEvent;
   appender or added by the user).  Therefore by default all the
   conversion patterns in <code>PatternLayout</code> can be used
   inside of the statement.  (see the test cases for examples)
+
+  <p>By default (CVE-2022-23305) the statement is executed as a
+  <code>PreparedStatement</code>: every single-quoted string literal of the
+  sql option that contains a conversion pattern (e.g. <code>'%m'</code>) is
+  replaced by a bind variable and the formatted value is passed as a
+  parameter, so logged data can never alter the SQL statement.  In this mode
+  only <code>org.apache.log4j.PatternLayout</code> is supported, and
+  <code>getLogStatement</code> and <code>execute</code> are not used.  The
+  legacy (insecure) string concatenation can be restored by setting the
+  system property
+  <code>org.apache.log4j.jdbc.JDBCAppender.secure_jdbc_replacement</code>
+  to <code>false</code>.
 
   <p>Overriding the {@link #getLogStatement} method allows more
   explicit control of the statement used for logging.
@@ -77,6 +91,21 @@ import org.apache.log4j.spi.LoggingEvent;
 */
 public class JDBCAppender extends org.apache.log4j.AppenderSkeleton
     implements org.apache.log4j.Appender {
+
+  /**
+   * When true (the default), log events are written with a
+   * <code>PreparedStatement</code> and bind variables instead of formatting
+   * the event into the SQL text (CVE-2022-23305).
+   */
+  private final boolean secureSqlReplacement =
+    OptionConverter.toBoolean(
+      OptionConverter.getSystemProperty(
+        "org.apache.log4j.jdbc.JDBCAppender.secure_jdbc_replacement", "true"),
+      true);
+
+  private static final IllegalArgumentException ILLEGAL_PATTERN_FOR_SECURE_EXEC =
+    new IllegalArgumentException(
+      "Only org.apache.log4j.PatternLayout is supported for now due to CVE-2022-23305");
 
   /**
    * URL of the DB for default connection handling
@@ -112,6 +141,8 @@ public class JDBCAppender extends org.apache.log4j.AppenderSkeleton
    * Also see PatternLayout.
    */
   protected String sqlStatement = "";
+
+  private JdbcPatternParser preparedStatementParser = new JdbcPatternParser();
 
   /**
    * size of LoggingEvent buffer before writting to the database.
@@ -280,8 +311,25 @@ public class JDBCAppender extends org.apache.log4j.AppenderSkeleton
    * If a statement fails the LoggingEvent stays in the buffer!
    */
   public void flushBuffer() {
+    if (buffer.isEmpty()) {
+      return;
+    }
     //Do the actual logging
     removes.ensureCapacity(buffer.size());
+    if (secureSqlReplacement) {
+      flushBufferSecure();
+    } else {
+      flushBufferInsecure();
+    }
+
+    // remove from the buffer any events that were reported
+    buffer.removeAll(removes);
+
+    // clear the buffer of reported events
+    removes.clear();
+  }
+
+  private void flushBufferInsecure() {
     for (Iterator i = buffer.iterator(); i.hasNext();) {
       LoggingEvent logEvent = (LoggingEvent)i.next();
       try {
@@ -295,12 +343,58 @@ public class JDBCAppender extends org.apache.log4j.AppenderSkeleton
         removes.add(logEvent);
       }
     }
-    
-    // remove from the buffer any events that were reported
-    buffer.removeAll(removes);
-    
-    // clear the buffer of reported events
-    removes.clear();
+  }
+
+  private void flushBufferSecure() {
+    // Prepare events that we will store to the DB
+    removes.addAll(buffer);
+
+    if (layout == null || layout.getClass() != PatternLayout.class) {
+      errorHandler.error("Failed to convert pattern " + layout + " to SQL",
+                         ILLEGAL_PATTERN_FOR_SECURE_EXEC,
+                         ErrorCode.MISSING_LAYOUT);
+      return;
+    }
+    PatternLayout patternLayout = (PatternLayout) layout;
+    preparedStatementParser.setPattern(patternLayout.getConversionPattern());
+    Connection con = null;
+    boolean useBatch = removes.size() > 1;
+    try {
+      con = getConnection();
+      PreparedStatement ps =
+        con.prepareStatement(preparedStatementParser.getParameterizedSql());
+      try {
+        for (Iterator i = removes.iterator(); i.hasNext();) {
+          LoggingEvent logEvent = (LoggingEvent) i.next();
+          try {
+            preparedStatementParser.setParameters(ps, logEvent);
+            if (useBatch) {
+              ps.addBatch();
+            }
+          } catch (SQLException e) {
+            errorHandler.error("Failed to append parameters", e,
+                               ErrorCode.FLUSH_FAILURE);
+          }
+        }
+        if (useBatch) {
+          ps.executeBatch();
+        } else {
+          ps.execute();
+        }
+      } finally {
+        try {
+          ps.close();
+        } catch (SQLException ignored) {
+        }
+      }
+    } catch (SQLException e) {
+      errorHandler.error("Failed to append messages sql", e,
+                         ErrorCode.FLUSH_FAILURE);
+    } finally {
+      if (con != null) {
+        closeConnection(con);
+      }
+    }
   }
 
 
