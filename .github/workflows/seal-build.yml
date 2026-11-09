@@ -1,0 +1,91 @@
+name: seal-build
+
+# log4j 1.2.17 has no GitHub Actions CI upstream. This workflow mirrors the
+# project's own Maven build (pom.xml): `mvn verify` compiles for -source/-target
+# 1.4, runs the Ant regression suite (tests/build.xml target `runAll`) via the
+# maven-antrun-plugin `runAll` execution bound to the test phase, and packages
+# the OSGi bundle jar with maven-bundle-plugin.
+
+on:
+  workflow_dispatch:
+    inputs:
+      test-filter:
+        description: "tests/build.xml target to run instead of runAll (e.g. Core, DOM, PatternParser)"
+        required: false
+        default: ""
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      MAVEN_VERSION: 3.6.3
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 7
+        uses: actions/setup-java@v4
+        with:
+          distribution: zulu
+          java-version: "7"
+
+      - name: Install Maven ${{ env.MAVEN_VERSION }}
+        run: |
+          curl -fsSL "https://archive.apache.org/dist/maven/maven-3/${MAVEN_VERSION}/binaries/apache-maven-${MAVEN_VERSION}-bin.tar.gz" \
+            | tar -xz -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/apache-maven-${MAVEN_VERSION}/bin" >> "$GITHUB_PATH"
+          # The pom declares the defunct http://download.java.net/maven/2/ repository;
+          # route it to Maven Central so resolution does not stall on it.
+          mkdir -p ~/.m2
+          cat > ~/.m2/settings.xml <<'EOF'
+          <settings>
+            <mirrors>
+              <mirror>
+                <id>central-for-java-net</id>
+                <mirrorOf>maven2-repository.dev.java.net</mirrorOf>
+                <url>https://repo.maven.apache.org/maven2</url>
+              </mirror>
+            </mirrors>
+          </settings>
+          EOF
+
+      - name: Toolchain versions
+        run: |
+          java -version
+          mvn -v
+
+      - name: Build and test
+        env:
+          MAVEN_OPTS: -Dhttps.protocols=TLSv1.2 -Xmx1024m
+        run: |
+          set -o pipefail
+          if [ -n "${{ inputs.test-filter }}" ]; then
+            mvn -B -e clean verify -Dmaven.site.skip=true -Dlog4j.tests.target=${{ inputs.test-filter }} 2>&1 | tee "$RUNNER_TEMP/build.log"
+          else
+            mvn -B -e clean verify -Dmaven.site.skip=true 2>&1 | tee "$RUNNER_TEMP/build.log"
+          fi
+
+      - name: Test summary
+        if: always()
+        run: |
+          # Ant's <junit printsummary> prints one "Tests run: N, Failures: F, Errors: E" line per
+          # suite; total them so the log states the overall passing count.
+          # Only the printsummary line right after "[junit] Running <suite>" is counted, so the
+          # plain formatter's duplicate line is not double-counted.
+          awk '
+            /\[junit\] Running / { suite = $NF; want = 1; next }
+            want && /Tests run:/ {
+              match($0, /Tests run: [0-9]+, Failures: [0-9]+, Errors: [0-9]+/)
+              split(substr($0, RSTART, RLENGTH), a, /[^0-9]+/)
+              printf "SUITE %-60s run=%d failures=%d errors=%d\n", suite, a[2], a[3], a[4]
+              r += a[2]; f += a[3]; e += a[4]; n++; want = 0
+            }
+            END { printf "TOTAL: %d suites, tests run: %d, failures: %d, errors: %d, passed: %d\n", n, r, f, e, r - f - e }
+          ' "$RUNNER_TEMP/build.log"
+
+      - name: Upload jar
+        uses: actions/upload-artifact@v4
+        with:
+          name: log4j-jar
+          path: target/log4j-1.2.17.jar
+          if-no-files-found: error
